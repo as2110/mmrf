@@ -1,0 +1,338 @@
+---
+title: "Untitled"
+author: "Anand Srinivasan"
+date: "17/12/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+#library(MMRFBiolinks)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(tidyverse)
+library(DT)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(biomaRt)
+library("EnsDb.Hsapiens.v86")
+library(DESeq2)
+library(magrittr)
+library(survminer)
+library(survival)
+```
+
+
+```{r using_counts_from_MMRF_gateway_load_data}
+mmrf_trt_response <- read.delim("clinical/MMRF_CoMMpass_IA21_STAND_ALONE_TRTRESP.tsv") %>%
+  rename("public_id" = 1)
+mmrf_all_patient <- read.delim("clinical/MMRF_CoMMpass_IA21_PER_PATIENT.tsv")
+
+survival_table_mmrf <- read.delim("clinical/MMRF_CoMMpass_IA21_STAND_ALONE_SURVIVAL.tsv")
+#mmrf_dictionary <- read.delim("MMRF_CoMMpass_IA21_STAND_ALONE_SURVIVAL.tsv")
+gene_counts_mmrf_gateway <- read.delim("counts/Gene Based_MMRF_CoMMpass_IA21_star_geneUnstranded_counts.tsv.gz")
+
+
+ ## read the raw data file
+  raw <- gene_counts_mmrf_gateway %>%
+    mutate(
+      hgnc_symbol = mapIds(
+        EnsDb.Hsapiens.v86,
+        keys = Gene,
+        keytype = "GENEID",
+        column = "SYMBOL"
+      ),
+      .before = 1
+    ) %>%
+    drop_na() %>%
+    dplyr::select(-Gene) %>%
+    group_by(hgnc_symbol) %>%
+    summarise(across(everything(), ~ sum(.))) %>%
+    mutate(
+      id = mapIds(
+        EnsDb.Hsapiens.v86,
+        keys = hgnc_symbol,
+        keytype = "SYMBOL",
+        column = "GENEID"
+      ),
+      .before = 1
+    ) %>% dplyr::select(-2)
+
+  #View(raw)
+  ## transcript is a list containing all the transcript names
+
+  transcripts <- pull(raw, 1)
+
+
+  ## Create a matrix from the tsv file. cts is a matrix with numerical data only for all 30 samples
+
+  cts <- as.matrix(raw[,-1])
+
+  ##annotate row names in cts with the pulled genes names vector.
+
+  rownames(cts) <- transcripts
+
+  ##read in the meta data file
+  sampleinfo <- gene_counts_mmrf_gateway %>% dplyr::select(-1) %>% colnames() %>% data.frame()
+  colnames(sampleinfo) <- "PUBLIC_ID"
+  rownames(sampleinfo) <- sampleinfo$PUBLIC_ID
+  sampleinfo %<>% 
+    mutate(barcode = PUBLIC_ID) %>%
+    separate(barcode,
+                          into = c("study", "code", "line", "tissue", "cell"),
+                          sep = "_") %>% unite("PUBLIC_ID", study:code) %>%
+    dplyr::filter(line == 1, tissue == "BM")
+
+
+survival_table_mmrf_filtered <- survival_table_mmrf %>%
+  dplyr::filter(PUBLIC_ID %in% sampleinfo$PUBLIC_ID) 
+
+
+all_primary_cases <- sampleinfo %>% 
+  dplyr::filter(PUBLIC_ID %in% survival_table_mmrf_filtered$PUBLIC_ID) %>%
+  unite("barcode", PUBLIC_ID:cell) %>% pull()
+
+cts <- cts[ , all_primary_cases]
+sampleinfo <- sampleinfo[all_primary_cases, ] %>% rownames_to_column("barcode")
+sampleinfo <- sampleinfo %>% left_join(survival_table_mmrf_filtered)
+sampleinfo <- sampleinfo %>% mutate(vital_status = ifelse(is.na(deathdy), "Alive", "Dead"), 
+                                    days_to_last_follow_up = lvisitdy,
+                                    case_id = rownames(.))
+rownames(sampleinfo) <- sampleinfo$barcode
+
+all_PI_IDs <-  
+  mmrf_trt_response %>% 
+  dplyr::filter(trtclass %in% c("Bortezomib-based", "combined bortezomib/carfilzomib-based", "Carfilzomib-based")) %>%
+  dplyr::filter(trtstdy ==1 ) %>%
+  dplyr::filter(line==1) #%>%
+  #dplyr::filter(public_id %in% c(IDs_Bort, IDs_Car)) 
+
+all_PI_samples <-  all_PI_IDs %>%
+  dplyr::select(public_id, response, pddy) %>%
+  distinct() %>% 
+  mutate(response = as.factor(response))
+
+dds <- DESeqDataSetFromMatrix(countData = cts,
+                                colData = sampleinfo,
+                                design = ~1)
+
+
+keep <- rowSums(assay(dds) >= 10) >= 5
+  #keep <- is_expressed >= 5
+  #table(keep)
+
+dds <- dds[keep,]
+
+
+dds_annotated <- 
+  assay(dds) %>%
+  as.data.frame() %>%
+  rownames_to_column("id") %>%
+  mutate(id = tools::file_path_sans_ext(id)) %>%
+  mutate(
+    hgnc_symbol = mapIds(
+      EnsDb.Hsapiens.v86,
+      keys = id,
+      keytype = "GENEID",
+      column = "SYMBOL"
+    ),
+    .before = 1
+  ) %>%
+  mutate(
+    TXBIOTYPE = mapIds(
+      EnsDb.Hsapiens.v86,
+      keys = id,
+      keytype = "GENEID",
+      column = "TXBIOTYPE"
+    ),
+    .after = 1
+  ) %>%
+  dplyr::filter(TXBIOTYPE == "protein_coding") %>%
+  dplyr::select(-id, -TXBIOTYPE) %>%
+  group_by(hgnc_symbol) %>%
+  summarise(across(everything(), ~ sum(.))) %>%
+  dplyr::filter(!is.na(hgnc_symbol)) %>%
+  column_to_rownames("hgnc_symbol") %>% as.matrix()
+
+
+dds <- DESeqDataSetFromMatrix(countData = dds_annotated,
+                                colData = as.data.frame(colData(dds)),
+                                design = ~1)
+
+vsd <- DESeq2::vst(dds,
+                   blind = TRUE)
+
+dds2 <- dds[, dds$PUBLIC_ID %in% all_PI_samples$public_id]
+
+vsd2 <- DESeq2::vst(dds2,
+                   blind = TRUE)
+
+```
+
+
+```{r using_counts_from_MMRF_gateway_make_plots}
+
+my_surival_function <- function(normalised_se = vsd, genelist, cutoff = 0.75) {
+  plot_list <- list()
+  for (gene in genelist) {
+    mmrf_sox2 <- assay(normalised_se) %>%
+      as.data.frame() %>%
+      rownames_to_column("gene_id") %>%
+      gather(key = "case_id", value = "counts",-gene_id) %>%
+      dplyr::filter(gene_id == gene)
+    
+    
+    median_value <- quantile(mmrf_sox2$counts, cutoff) 
+    
+    mmrf_sox2 %<>% mutate(strata = ifelse(counts > median_value, "HIGH", "LOW"))
+    mmrf_sox2 %<>% left_join(as.data.frame(colData(normalised_se)), by = c("case_id" = "barcode"))
+    
+    mmrf_sox2 %<>% mutate(deceased = ifelse(vital_status == "Alive", 0, 1))
+    
+    fit <-
+      survival::survfit(Surv(days_to_last_follow_up, deceased) ~ strata, data = mmrf_sox2)
+    
+    survival_plot <- ggsurvplot(fit,
+                                data = mmrf_sox2,
+                                pval = T,
+                                risk.table = T)
+    
+    
+    
+    plot_list[[gene]][["plot"]] <- survival_plot$plot
+    plot_list[[gene]][["table"]] <- survival_plot$table
+  }
+  #names(plot_list) <- genelist
+  return(plot_list)
+}
+
+my_surival_function_progression <- function(normalised_se = vsd, genelist, cutoff = 0.75) {
+  plot_list <- list()
+  for (gene in genelist) {
+    mmrf_sox2 <- assay(normalised_se) %>%
+      as.data.frame() %>%
+      rownames_to_column("gene_id") %>%
+      gather(key = "case_id", value = "counts",-gene_id) %>%
+      dplyr::filter(gene_id == gene)
+    
+    
+    median_value <- quantile(mmrf_sox2$counts, cutoff)
+    
+    mmrf_sox2 %<>% mutate(strata = ifelse(counts > median_value, "HIGH", "LOW"))
+    mmrf_sox2 %<>% left_join(as.data.frame(colData(normalised_se)), by = c("case_id" = "barcode")) %>%
+      left_join(all_PI_samples, by = c("PUBLIC_ID" = "public_id")) %>%
+      mutate(
+        progression_status = ifelse(pddy1 %>% is.na(), 0, 1),
+        days_to_progression_censor = ifelse(pddy1 %>% is.na(),
+                                            days_to_last_follow_up, pddy1)
+      )
+    
+    mmrf_sox2 %<>% mutate(deceased = ifelse(vital_status == "Alive", 0, 1))
+    
+    fit <-
+      survival::survfit(Surv(days_to_progression_censor, progression_status) ~ strata, data = mmrf_sox2)
+    
+    survival_plot <- ggsurvplot(fit,
+                                data = mmrf_sox2,
+                                pval = T,
+                                risk.table = T)
+    
+    
+    
+    plot_list[[gene]][["plot"]] <- survival_plot$plot
+    plot_list[[gene]][["table"]] <- survival_plot$table
+  }
+  #names(plot_list) <- genelist
+  return(plot_list)
+}
+
+
+
+
+gc()
+plots_OS_2 <- my_surival_function(
+  normalised_se = vsd2,
+  gene = c(
+    "SOX2",
+    #"DACH1",
+    #"ARNT",
+    #"POU3F2",
+    "ETS1",
+    "BHLHE40",
+    "POU2AF1",
+    #"KLF7",
+    "TP53",
+    "ABCB1"
+    # "KCNK1",
+    # "HCN2",
+    # "IRF8",
+    # "TPRG1",
+    # "RDM1"
+  ), 0.9
+)
+
+#Sys.sleep(4)
+gc()
+
+plots_PFS_2 <- my_surival_function_progression(
+  normalised_se = vsd2,
+  gene = c(
+    "SOX2",
+    # "DACH1",
+    # "ARNT",
+    #"POU3F2",
+    "ETS1",
+    "BHLHE40",
+    "POU2AF1",
+    #"KLF7",
+    "TP53",
+    "ABCB1"
+    # "KCNK1",
+    # "HCN2",
+    # "IRF8",
+    # "TPRG1",
+    # "RDM1"
+  ), 0.9
+)
+
+#Sys.sleep(4)
+gc()
+
+plots_OS$ETS1
+plots_OS_2$ETS1
+plots_PFS$ETS1
+plots_PFS_2$ETS1
+
+
+plots_OS$ABCB1
+plots_OS_2$ABCB1
+plots_PFS$ABCB1
+plots_PFS_2$ABCB1
+
+
+plots_OS$TP53
+plots_OS_2$TP53
+plots_PFS$TP53
+plots_PFS_2$TP53
+
+
+plots_OS$SOX2
+plots_OS_2$SOX2
+plots_PFS$SOX2
+plots_PFS_2$SOX2
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

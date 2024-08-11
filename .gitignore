@@ -50,6 +50,9 @@ rsconnect/
 *.Rda
 .rda
 .Renviron
+/data/*
+/counts/*
 /results/*
 !/**/.gitkeep
 /*.tsv
+/clinical/*.tsv

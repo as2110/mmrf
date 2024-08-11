@@ -1,0 +1,257 @@
+---
+title: "Untitled"
+author: "Anand Srinivasan"
+date: "17/12/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+#library(MMRFBiolinks)
+library(TCGAbiolinks)
+library(SummarizedExperiment)
+library(tidyverse)
+library(DT)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(biomaRt)
+library("EnsDb.Hsapiens.v86")
+library(DESeq2)
+library(magrittr)
+library(survminer)
+library(survival)
+```
+
+
+```{r load_data}
+MMRnaseqSE <- readRDS("data/MM_RNASeqSE.rds")
+
+dds <- DESeqDataSetFromMatrix(countData = assay(MMRnaseqSE),
+                                colData = as.data.frame(colData(MMRnaseqSE)),
+                                design = ~1)
+
+
+keep <- rowSums(assay(dds) >= 10) >= 5
+  #keep <- is_expressed >= 5
+  #table(keep)
+
+dds <- dds[keep,]
+
+
+dds_annotated <- 
+  assay(dds) %>%
+  as.data.frame() %>%
+  rownames_to_column("id") %>%
+  mutate(id = tools::file_path_sans_ext(id)) %>%
+  mutate(
+    hgnc_symbol = mapIds(
+      EnsDb.Hsapiens.v86,
+      keys = id,
+      keytype = "GENEID",
+      column = "SYMBOL"
+    ),
+    .before = 1
+  ) %>%
+  mutate(
+    TXBIOTYPE = mapIds(
+      EnsDb.Hsapiens.v86,
+      keys = id,
+      keytype = "GENEID",
+      column = "TXBIOTYPE"
+    ),
+    .after = 1
+  ) %>%
+  #dplyr::filter(TXBIOTYPE == "protein_coding") %>%
+  dplyr::select(-id, -TXBIOTYPE) %>%
+  group_by(hgnc_symbol) %>%
+  summarise(across(everything(), ~ sum(.))) %>%
+  dplyr::filter(!is.na(hgnc_symbol)) %>%
+  column_to_rownames("hgnc_symbol") %>% as.matrix()
+
+
+dds <- DESeqDataSetFromMatrix(countData = dds_annotated,
+                                colData = as.data.frame(colData(dds)),
+                                design = ~1)
+
+vsd <- DESeq2::vst(dds,
+                   blind = TRUE)
+
+
+
+### PI only samples ####
+
+clinMMGateway_2 <- read.delim("clinical/MMRF_CoMMpass_IA17_STAND_ALONE_TRTRESP_V2.tsv") %>%
+  rename("public_id" = 1)
+
+
+IDs_Bort<-MMRFGDC_QuerySamples(query=query.mm,typesample=tsample, clin.mm=clin,therapyname="Bortezomib") #case 1
+
+IDs_Car <- MMRFGDC_QuerySamples(query=query.mm,typesample=tsample, clin.mm=clin,therapyname="Carfilzomib")
+
+all_PI_IDs <-  
+  clinMMGateway_2 %>% 
+  dplyr::filter(trtclass %in% c("Bortezomib-based", "combined bortezomib/carfilzomib-based", "Carfilzomib-based")) %>%
+  dplyr::filter(trtstdy ==1 ) %>%
+  dplyr::filter(line==1) %>%
+  dplyr::filter(public_id %in% c(IDs_Bort, IDs_Car)) 
+
+all_PI_samples <-  all_PI_IDs %>%
+  dplyr::select(public_id, response, pddy) %>%
+  distinct() %>% 
+  mutate(response = as.factor(response))
+
+
+
+
+dds2 <- dds[, dds$patient %in% all_PI_samples$public_id]
+
+vsd2 <- DESeq2::vst(dds2,
+                   blind = TRUE)
+
+```
+
+
+```{r make_survival_plots}
+rm(MMRnaseqSE)
+my_surival_function <- function(normalised_se = vsd, genelist, cutoff = 0.75) {
+  plot_list <- list()
+  for (gene in genelist) {
+    mmrf_sox2 <- assay(normalised_se) %>%
+      as.data.frame() %>%
+      rownames_to_column("gene_id") %>%
+      gather(key = "case_id", value = "counts",-gene_id) %>%
+      dplyr::filter(gene_id == gene)
+    
+    
+    median_value <- quantile(mmrf_sox2$counts, cutoff) 
+    
+    mmrf_sox2 %<>% mutate(strata = ifelse(counts > median_value, "HIGH", "LOW"))
+    mmrf_sox2 %<>% left_join(as.data.frame(colData(normalised_se)), by = c("case_id" = "barcode"))
+    
+    mmrf_sox2 %<>% mutate(deceased = ifelse(vital_status == "Alive", 0, 1))
+    
+    fit <-
+      survival::survfit(Surv(days_to_last_follow_up, deceased) ~ strata, data = mmrf_sox2)
+    
+    survival_plot <- ggsurvplot(fit,
+                                data = mmrf_sox2,
+                                pval = T,
+                                risk.table = T)
+    
+    
+    
+    plot_list[[gene]][["plot"]] <- survival_plot$plot
+    plot_list[[gene]][["table"]] <- survival_plot$table
+  }
+  #names(plot_list) <- genelist
+  return(plot_list)
+}
+
+my_surival_function_progression <- function(normalised_se = vsd, genelist, cutoff = 0.75) {
+  plot_list <- list()
+  for (gene in genelist) {
+    mmrf_sox2 <- assay(normalised_se) %>%
+      as.data.frame() %>%
+      rownames_to_column("gene_id") %>%
+      gather(key = "case_id", value = "counts",-gene_id) %>%
+      dplyr::filter(gene_id == gene)
+    
+    
+    median_value <- quantile(mmrf_sox2$counts, cutoff)
+    
+    mmrf_sox2 %<>% mutate(strata = ifelse(counts > median_value, "HIGH", "LOW"))
+    mmrf_sox2 %<>% left_join(as.data.frame(colData(normalised_se)), by = c("case_id" = "barcode")) %>% left_join(all_PI_samples, by = c("patient" = "public_id")) %>% mutate(progression_status = ifelse(pddy %>% is.na(), 0, 1), 
+                                                                                                            days_to_progression_censor = ifelse(pddy %>% is.na(), days_to_last_follow_up, pddy))
+    
+    mmrf_sox2 %<>% mutate(deceased = ifelse(vital_status == "Alive", 0, 1))
+    
+    fit <-
+      survival::survfit(Surv(days_to_progression_censor, progression_status) ~ strata, data = mmrf_sox2)
+    
+    survival_plot <- ggsurvplot(fit,
+                                data = mmrf_sox2,
+                                pval = T,
+                                risk.table = T)
+    
+    
+    
+    plot_list[[gene]][["plot"]] <- survival_plot$plot
+    plot_list[[gene]][["table"]] <- survival_plot$table
+  }
+  #names(plot_list) <- genelist
+  return(plot_list)
+}
+
+
+
+
+gc()
+plots_OS <- my_surival_function(
+  normalised_se = vsd2,
+  gene = c(
+    "SOX2",
+    #"DACH1",
+    #"ARNT",
+    #"POU3F2",
+    "ETS1",
+    "BHLHE40",
+    "POU2AF1",
+    #"KLF7",
+    "TP53",
+    "ABCB1"
+    #"KCNK1",
+    #"HCN2",
+    #"IRF8",
+    #"TPRG1",
+    #"RDM1"
+  ), 0.9
+)
+
+Sys.sleep(4)
+gc()
+
+plots_PFS <- my_surival_function_progression(
+  normalised_se = vsd2,
+  gene = c(
+    "SOX2",
+    #"DACH1",
+    #"ARNT",
+    #"POU3F2",
+    "ETS1",
+    "BHLHE40",
+    "POU2AF1",
+    #"KLF7",
+    "TP53",
+    "ABCB1"
+    # "KCNK1",
+    # "HCN2",
+    # "IRF8",
+    # "TPRG1",
+    # "RDM1"
+  ), 0.9
+)
+
+Sys.sleep(4)
+gc()
+plots_OS$SOX2
+plots_PFS$SOX2
+#clinMMGateway_2$trtclass %>% unique()
+
+#all_PI_samples %>% mutate(BOR =
+#MMRFRG_GetBorInfo(clin.rg=clinMMGateway_2,listSamples=all_PI_samples$public_id)
+#colData(vsd) %>% as.data.frame() %>% nrow()
+```
+
+
+
+
+
+
+
+
+
+
+
+

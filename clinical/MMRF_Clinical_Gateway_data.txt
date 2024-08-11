@@ -1,0 +1,1 @@
+Get access to MMRF Research Gateway and download the FlatFiles with the zipped tsv files with clinical details and treatment response data and place here.

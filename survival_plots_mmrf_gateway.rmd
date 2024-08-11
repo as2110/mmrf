@@ -22,6 +22,7 @@ library(DESeq2)
 library(magrittr)
 library(survminer)
 library(survival)
+library(data.table)
 ```
 
 
@@ -34,6 +35,7 @@ survival_table_mmrf <- read.delim("clinical/MMRF_CoMMpass_IA21_STAND_ALONE_SURVI
 #mmrf_dictionary <- read.delim("MMRF_CoMMpass_IA21_STAND_ALONE_SURVIVAL.tsv")
 gene_counts_mmrf_gateway <- read.delim("counts/Gene Based_MMRF_CoMMpass_IA21_star_geneUnstranded_counts.tsv.gz")
 
+mmrf_clinical_dictionary <- fread("clinical/data_dictionary/MMRF_CoMMpass_IA21_STAND_ALONE_SURVIVAL.tsv")
 
  ## read the raw data file
   raw <- gene_counts_mmrf_gateway %>%
@@ -192,7 +194,7 @@ my_surival_function <- function(normalised_se = vsd, genelist, cutoff = 0.75) {
     mmrf_sox2 %<>% mutate(deceased = ifelse(vital_status == "Alive", 0, 1))
     
     fit <-
-      survival::survfit(Surv(days_to_last_follow_up, deceased) ~ strata, data = mmrf_sox2)
+      survival::survfit(Surv(ttcos, censos) ~ strata, data = mmrf_sox2)
     
     survival_plot <- ggsurvplot(fit,
                                 data = mmrf_sox2,
@@ -232,7 +234,7 @@ my_surival_function_progression <- function(normalised_se = vsd, genelist, cutof
     mmrf_sox2 %<>% mutate(deceased = ifelse(vital_status == "Alive", 0, 1))
     
     fit <-
-      survival::survfit(Surv(days_to_progression_censor, progression_status) ~ strata, data = mmrf_sox2)
+      survival::survfit(Surv(ttcpfs1, censpfs1) ~ strata, data = mmrf_sox2)
     
     survival_plot <- ggsurvplot(fit,
                                 data = mmrf_sox2,
@@ -253,7 +255,7 @@ my_surival_function_progression <- function(normalised_se = vsd, genelist, cutof
 
 gc()
 plots_OS_2 <- my_surival_function(
-  normalised_se = vsd2,
+  normalised_se = vsd,
   gene = c(
     "SOX2",
     #"DACH1",
@@ -277,7 +279,7 @@ plots_OS_2 <- my_surival_function(
 gc()
 
 plots_PFS_2 <- my_surival_function_progression(
-  normalised_se = vsd2,
+  normalised_se = vsd,
   gene = c(
     "SOX2",
     # "DACH1",
@@ -322,6 +324,42 @@ plots_OS$SOX2
 plots_OS_2$SOX2
 plots_PFS$SOX2
 plots_PFS_2$SOX2
+
+
+plots_OS$BHLHE40
+plots_OS_2$BHLHE40
+plots_PFS$BHLHE40
+plots_PFS_2$BHLHE40
+
+
+
+
+ # mmrf_sox2 <- assay(vsd) %>%
+ #      as.data.frame() %>%
+ #      rownames_to_column("gene_id") %>%
+ #      gather(key = "case_id", value = "counts",-gene_id) %>%
+ #      dplyr::filter(gene_id == "SOX2")
+ #    
+ #    
+ #    median_value <- quantile(mmrf_sox2$counts, 0.9) 
+ #    
+ #    mmrf_sox2 %<>% mutate(strata = ifelse(counts > median_value, "HIGH", "LOW"))
+ #    mmrf_sox2 %<>% left_join(as.data.frame(colData(vsd)), by = c("case_id" = "barcode"))
+ #    
+ #    mmrf_sox2 %<>% mutate(deceased = ifelse(vital_status == "Alive", 0, 1))
+ #    
+ #    
+ #    mmrf_sox2 %>% dplyr::select(strata, deceased, days_to_last_follow_up, deathdy, lvisitdy, censrdur, censos, oscdy, ttcos, ttos, ttcpfs, ttcpfs1, censpfs, censpfs1) %>% View()
+ #      dplyr::filter(ttcos != days_to_last_follow_up) %>%
+ #      View()
+ #      
+ #      
+ #     fit <-
+ #      survival::survfit(Surv(ttcos, censos) ~ strata, data = mmrf_sox2)
+ #    summary(fit)$table[, "median"]
+ #    
+ #    
+ #    1704/30
 ```
 
 

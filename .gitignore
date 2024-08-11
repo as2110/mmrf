@@ -56,3 +56,4 @@ rsconnect/
 !/**/.gitkeep
 /*.tsv
 /clinical/*.tsv
+/clinical/data_dictionary/*.tsv

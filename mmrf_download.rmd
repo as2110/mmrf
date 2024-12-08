@@ -116,11 +116,5 @@ colData(a) %>% as.data.frame() %>% dplyr::select(response) %>% rownames_to_colum
                 na = "NA",
                 row.names=FALSE,
                 quote=FALSE)
-
-
-
-
-
-
 ```
 

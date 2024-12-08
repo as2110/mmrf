@@ -23,6 +23,15 @@ library(magrittr)
 library(survminer)
 library(survival)
 library(data.table)
+library(ggplot2)
+library(ggsurvfit)
+librarian::shelf(gtsummary)
+librarian::shelf(tidycmprsk)
+librarian::shelf(cardx)
+
+if (! dir.exists("results")) {
+  dir.create("results")
+}
 ```
 
 
@@ -36,6 +45,8 @@ survival_table_mmrf <- read.delim("clinical/MMRF_CoMMpass_IA21_STAND_ALONE_SURVI
 gene_counts_mmrf_gateway <- read.delim("counts/Gene Based_MMRF_CoMMpass_IA21_star_geneUnstranded_counts.tsv.gz")
 
 mmrf_clinical_dictionary <- fread("clinical/data_dictionary/MMRF_CoMMpass_IA21_STAND_ALONE_SURVIVAL.tsv")
+
+mmrf_trt_rest_dictionary <- fread("clinical/data_dictionary/MMRF_CoMMpass_IA21_STAND_ALONE_TRTRESP.tsv")
 
  ## read the raw data file
   raw <- gene_counts_mmrf_gateway %>%
@@ -143,16 +154,16 @@ dds_annotated <-
     .before = 1
   ) %>%
   mutate(
-    TXBIOTYPE = mapIds(
+    GENEBIOTYPE = mapIds(
       EnsDb.Hsapiens.v86,
-      keys = id,
-      keytype = "GENEID",
-      column = "TXBIOTYPE"
+      keys = hgnc_symbol,
+      keytype = "SYMBOL",
+      column = "GENEBIOTYPE"
     ),
     .after = 1
   ) %>%
-  dplyr::filter(TXBIOTYPE == "protein_coding") %>%
-  dplyr::select(-id, -TXBIOTYPE) %>%
+  dplyr::filter(GENEBIOTYPE == "protein_coding") %>%
+  dplyr::select(-id, -GENEBIOTYPE) %>%
   group_by(hgnc_symbol) %>%
   summarise(across(everything(), ~ sum(.))) %>%
   dplyr::filter(!is.na(hgnc_symbol)) %>%
@@ -175,82 +186,161 @@ vsd2 <- DESeq2::vst(dds2,
 
 
 ```{r using_counts_from_MMRF_gateway_make_plots}
-
-my_surival_function <- function(normalised_se = vsd, genelist, cutoff = 0.75) {
-  plot_list <- list()
-  for (gene in genelist) {
-    mmrf_sox2 <- assay(normalised_se) %>%
-      as.data.frame() %>%
-      rownames_to_column("gene_id") %>%
-      gather(key = "case_id", value = "counts",-gene_id) %>%
-      dplyr::filter(gene_id == gene)
-    
-    
-    median_value <- quantile(mmrf_sox2$counts, cutoff) 
-    
-    mmrf_sox2 %<>% mutate(strata = ifelse(counts > median_value, "HIGH", "LOW"))
-    mmrf_sox2 %<>% left_join(as.data.frame(colData(normalised_se)), by = c("case_id" = "barcode"))
-    
-    mmrf_sox2 %<>% mutate(deceased = ifelse(vital_status == "Alive", 0, 1))
-    
-    fit <-
-      survival::survfit(Surv(ttcos, censos) ~ strata, data = mmrf_sox2)
-    
-    survival_plot <- ggsurvplot(fit,
-                                data = mmrf_sox2,
-                                pval = T,
-                                risk.table = T)
-    
-    
-    
-    plot_list[[gene]][["plot"]] <- survival_plot$plot
-    plot_list[[gene]][["table"]] <- survival_plot$table
-  }
-  #names(plot_list) <- genelist
-  return(plot_list)
-}
-
-my_surival_function_progression <- function(normalised_se = vsd, genelist, cutoff = 0.75) {
-  plot_list <- list()
-  for (gene in genelist) {
-    mmrf_sox2 <- assay(normalised_se) %>%
-      as.data.frame() %>%
-      rownames_to_column("gene_id") %>%
-      gather(key = "case_id", value = "counts",-gene_id) %>%
-      dplyr::filter(gene_id == gene)
-    
-    
-    median_value <- quantile(mmrf_sox2$counts, cutoff)
-    
-    mmrf_sox2 %<>% mutate(strata = ifelse(counts > median_value, "HIGH", "LOW"))
-    mmrf_sox2 %<>% left_join(as.data.frame(colData(normalised_se)), by = c("case_id" = "barcode")) %>%
-      left_join(all_PI_samples, by = c("PUBLIC_ID" = "public_id")) %>%
-      mutate(
-        progression_status = ifelse(pddy1 %>% is.na(), 0, 1),
-        days_to_progression_censor = ifelse(pddy1 %>% is.na(),
-                                            days_to_last_follow_up, pddy1)
+invisible(gc())
+my_surival_function <-
+  function(normalised_se = vsd,
+           genelist,
+           cutoff = 0.75) {
+    plot_list <- list()
+    for (gene in genelist) {
+      mmrf_sox2 <- assay(normalised_se) %>%
+        as.data.frame() %>%
+        rownames_to_column("gene_id") %>%
+        gather(key = "case_id", value = "counts", -gene_id) %>%
+        dplyr::filter(gene_id == gene)
+      
+      
+      median_value <- quantile(mmrf_sox2$counts, cutoff)
+      
+      mmrf_sox2 %<>% mutate(strata = ifelse(counts > median_value, "HIGH", "LOW"))
+      mmrf_sox2 %<>% left_join(as.data.frame(colData(normalised_se)), by = c("case_id" = "barcode"))
+      
+      mmrf_sox2 %<>% mutate(time = ttcos/30, status = censos)
+      
+      fit <-
+        survival::survfit(Surv(time = time, status) ~ strata, data = mmrf_sox2)
+      
+      fit2 <-
+        ggsurvfit::survfit2(Surv(time = ttcos, status) ~ strata, data = mmrf_sox2)
+      
+      
+      survival_plot <- ggsurvplot(
+        fit,
+        data = mmrf_sox2,
+        title = "MMRF CoMMpass",
+        caption = "Newly diagnosed patients",
+        xlab = "Months",
+        ylab = "Overall survival",
+        font.family = "sans",
+        font.title = c("bold", "brown", 18),
+        font.subtitle = c("bold", "dark grey", 14),
+        font.caption = c("bold.italic", "royal blue", 12),
+        font.legend = c("bold", "black", 12),
+        #surv.median.line = "hv", # Add medians survival
+        break.x.by = 10,
+        #xscale="d_m",
+        # Change legends: title & labels
+        legend.title = "SOX2 expresion",
+        legend.labs = c("High", "Low"),
+        # Add p-value and tervals
+        pval = TRUE,
+        
+        conf.int = TRUE,
+        #conf.int.style="step",
+        # Add risk table
+        risk.table = TRUE,
+        fontsize = 3,
+        tables.height = 0.2,
+        tables.theme = theme_cleantable(font.main = c(14, "bold", "black"), ),
+        
+        # Color palettes. Use custom color: c("#E7B800", "#2E9FDF"),
+        # or brewer color (e.g.: "Dark2"), or ggsci color (e.g.: "jco")
+        palette = c("darkred", "#2E9FDF"),
+        ggtheme = theme_bw() # Change ggplot2 theme
       )
-    
-    mmrf_sox2 %<>% mutate(deceased = ifelse(vital_status == "Alive", 0, 1))
-    
-    fit <-
-      survival::survfit(Surv(ttcpfs1, censpfs1) ~ strata, data = mmrf_sox2)
-    
-    survival_plot <- ggsurvplot(fit,
-                                data = mmrf_sox2,
-                                pval = T,
-                                risk.table = T)
-    
-    
-    
-    plot_list[[gene]][["plot"]] <- survival_plot$plot
-    plot_list[[gene]][["table"]] <- survival_plot$table
+      
+      
+      plot_list[[gene]][["median"]] <- fit %>%  tbl_survfit(probs = 0.5,
+                                                            label_header = "**Median survival (95% CI)**")
+      plot_list[[gene]][["sig"]] <-
+        survival::survdiff(Surv(ttcpfs1, censpfs1) ~ strata, data = mmrf_sox2)
+      plot_list[[gene]][["cox"]] <-
+        survival::coxph(Surv(ttcpfs1, censpfs1) ~ strata, data = mmrf_sox2)
+      plot_list[[gene]][["plot"]] <- survival_plot
+      plot_list[[gene]][["table"]] <- survival_plot$table
+    }
+    #names(plot_list) <- genelist
+    return(plot_list)
   }
-  #names(plot_list) <- genelist
-  return(plot_list)
-}
 
 
+my_surival_function_progression <-
+  function(normalised_se = vsd,
+           genelist,
+           cutoff = 0.75) {
+    plot_list <- list()
+    for (gene in genelist) {
+      mmrf_sox2 <- assay(normalised_se) %>%
+        as.data.frame() %>%
+        rownames_to_column("gene_id") %>%
+        gather(key = "case_id", value = "counts", -gene_id) %>%
+        dplyr::filter(gene_id == gene)
+      
+      
+      median_value <- quantile(mmrf_sox2$counts, cutoff)
+      
+      mmrf_sox2 %<>% mutate(strata = ifelse(counts > median_value, "HIGH", "LOW"))
+      mmrf_sox2 %<>% left_join(as.data.frame(colData(normalised_se)), by = c("case_id" = "barcode")) %>%
+        left_join(all_PI_samples, by = c("PUBLIC_ID" = "public_id")) %>%
+        mutate(
+          progression_status = ifelse(pddy1 %>% is.na(), 0, 1),
+          days_to_progression_censor = ifelse(pddy1 %>% is.na(),
+                                              days_to_last_follow_up, pddy1)
+        )
+      
+      mmrf_sox2 %<>% mutate(deceased = ifelse(vital_status == "Alive", 0, 1))
+      mmrf_sox2 %<>% mutate(time = ttcpfs1 / 30, status = censos)
+      
+      fit <-
+        ggsurvfit::survfit(Surv(time=time, censpfs1) ~ strata, data = mmrf_sox2)
+      
+      survival_plot <- ggsurvplot(
+        fit,
+        data = mmrf_sox2,
+        title = "MMRF CoMMpass",
+        caption = "Newly diagnosed patients",
+        xlab = "Months",
+        ylab = "Progression-free survival",
+        font.family = "sans",
+        font.title = c("bold", "brown", 18),
+        font.subtitle = c("bold", "dark grey", 14),
+        font.caption = c("bold.italic", "royal blue", 12),
+        font.legend = c("bold", "black", 12),
+        #surv.median.line = "hv", # Add medians survival
+        break.x.by = 10,
+        #xscale="d_m",
+        # Change legends: title & labels
+        legend.title = "SOX2 expresion",
+        legend.labs = c("High", "Low"),
+        # Add p-value and tervals
+        pval = TRUE,
+        
+        conf.int = TRUE,
+        #conf.int.style="step",
+        # Add risk table
+        risk.table = TRUE,
+        fontsize = 3,
+        tables.height = 0.2,
+        tables.theme = theme_cleantable(font.main = c(14, "bold", "black"), ),
+        
+        # Color palettes. Use custom color: c("#E7B800", "#2E9FDF"),
+        # or brewer color (e.g.: "Dark2"), or ggsci color (e.g.: "jco")
+        palette = c("darkred", "#2E9FDF"),
+        ggtheme = theme_bw() # Change ggplot2 theme
+      )
+      
+      plot_list[[gene]][["median"]] <- fit %>%  tbl_survfit(probs = 0.5,
+                                                            label_header = "**Median survival (95% CI)**")
+      plot_list[[gene]][["sig"]] <-
+        survival::survdiff(Surv(ttcpfs1, censpfs1) ~ strata, data = mmrf_sox2)
+      plot_list[[gene]][["cox"]] <-
+        survival::coxph(Surv(ttcpfs1, censpfs1) ~ strata, data = mmrf_sox2)
+      plot_list[[gene]][["plot"]] <- survival_plot
+      plot_list[[gene]][["table"]] <- survival_plot$table
+    }
+    #names(plot_list) <- genelist
+    return(plot_list)
+  }
 
 
 gc()
@@ -258,7 +348,7 @@ plots_OS_2 <- my_surival_function(
   normalised_se = vsd,
   gene = c(
     "SOX2",
-    #"DACH1",
+    "KLF2",
     #"ARNT",
     #"POU3F2",
     "ETS1",
@@ -266,13 +356,16 @@ plots_OS_2 <- my_surival_function(
     "POU2AF1",
     #"KLF7",
     "TP53",
+    "TP63",
+    "IRF2",
+    "MXD1",
     "ABCB1"
     # "KCNK1",
     # "HCN2",
     # "IRF8",
     # "TPRG1",
     # "RDM1"
-  ), 0.9
+  ), 0.8
 )
 
 #Sys.sleep(4)
@@ -282,7 +375,7 @@ plots_PFS_2 <- my_surival_function_progression(
   normalised_se = vsd,
   gene = c(
     "SOX2",
-    # "DACH1",
+    "KLF2",
     # "ARNT",
     #"POU3F2",
     "ETS1",
@@ -290,13 +383,16 @@ plots_PFS_2 <- my_surival_function_progression(
     "POU2AF1",
     #"KLF7",
     "TP53",
+    "TP63",
+    "IRF2",
+    "MXD1",
     "ABCB1"
     # "KCNK1",
     # "HCN2",
     # "IRF8",
     # "TPRG1",
     # "RDM1"
-  ), 0.9
+  ), 0.8
 )
 
 #Sys.sleep(4)
@@ -360,17 +456,186 @@ plots_PFS_2$BHLHE40
  #    
  #    
  #    1704/30
+
+
+plots_OS_2$IRF2
+plots_PFS_2$IRF2
+plots_OS_2$MXD1
+plots_PFS_2$MXD1
+plots_OS_2$ETS1
+plots_PFS_2$ETS1
+plots_OS_2$SOX2
+plots_PFS_2$SOX2
+plots_OS_2$KLF2
+plots_PFS_2$KLF2
+plots_OS_2$TP63
+plots_PFS_2$TP63
+
+ggsurvfit(plots_OS_2$SOX2$fit)
+
+2243/30
 ```
 
 
 
 
 
+```{r}
+ mmrf_sox2 <- assay(vsd) %>%
+      as.data.frame() %>%
+      rownames_to_column("gene_id") %>%
+      gather(key = "case_id", value = "counts",-gene_id) %>%
+      dplyr::filter(gene_id == "SOX2")
+    
+    
+    median_value <- quantile(mmrf_sox2$counts, 0.8) 
+    
+    mmrf_sox2 %<>% mutate(strata = ifelse(counts > median_value, "HIGH", "LOW"))
+    mmrf_sox2 %<>% left_join(as.data.frame(colData(vsd)), by = c("case_id" = "barcode"))
+    
+    mmrf_sox2 %<>% mutate(time=ttcos/30, status=censos)
+    
+    fit <-
+      survival::survfit(Surv(time=time, status) ~ strata, data = mmrf_sox2)
+    fit2 <- survival::survfit(Surv(ttcpfs1, censpfs1) ~ strata, data = mmrf_sox2)
+ 
+sox2_plot <- fit %>% 
+  ggsurvplot(data = mmrf_sox2,
+  ##labs
+  title="MMRF CoMMpass",
+  caption="Newly diagnosed patients",
+  xlab="Months",
+  ylab="Overall survival",
+  font.family = "sans",
+  font.title = c("bold", "brown", 18),
+      font.subtitle = c("bold", "dark grey", 14),
+      font.caption = c("bold.italic", "royal blue", 12),
+      font.legend = c("bold", "black", 12),
+ #surv.median.line = "hv", # Add medians survival
+break.x.by = 10,
+#xscale="d_m",
+ # Change legends: title & labels
+ legend.title = "SOX2 expresion",
+ legend.labs = c("High", "Low"),
+ # Add p-value and tervals
+ pval = TRUE,
+
+ conf.int = TRUE,
+ #conf.int.style="step",
+ # Add risk table
+ risk.table = TRUE,
+ fontsize = 3,
+ tables.height = 0.2,
+ tables.theme = theme_cleantable(font.main = c(14, "bold", "black"),),
+
+ # Color palettes. Use custom color: c("#E7B800", "#2E9FDF"),
+ # or brewer color (e.g.: "Dark2"), or ggsci color (e.g.: "jco")
+ palette = c("darkred", "#2E9FDF"),
+ ggtheme = theme_bw() # Change ggplot2 theme
+)
+sox2_plot$table %+% theme_cleantable(font.main = c("bold"))
+
+plots_OS_2$SOX2$plot
+sox2_plot
+sox2_plot %>% ggpar(font.title = c("bold", "brown", 18),
+      font.subtitle = c("bold", "dark grey", 14),
+      font.caption = c("bold.italic", "royal blue", 12),
+      font.legend = c("bold", "black", 16))
+
+png("results/SOX2_MMMRF_OS.png", heigh=8, width=8, res=300, units = "in")
+plots_OS_2$SOX2$plot
+dev.off()
+
+png("results/SOX2_MMMRF_PFS.png", heigh=8, width=8, res=300, units = "in")
+plots_PFS_2$SOX2$plot
+dev.off()
+
+plots_PFS_2$SOX2$median
+plots_OS_2$SOX2$median
+fit %>%  tbl_survfit(
+    probs = 0.495)
+
+plots_OS_2$SOX2$plot
+fit$time
+fread("clinical/data_dictionary/MMRF_CoMMpass_IA21_PER_PATIENT.tsv") %>% View()
+```
+
+
+
+```{r}
+ggsurvplot(data = mmrf_sox2,
+  ##labs
+  title="MMRF CoMMpass",
+  caption="Newly diagnosed patients",
+  xlab="Months",
+  ylab="Overall survival",
+  font.family = "sans",
+  font.title = c("bold", "brown", 18),
+      font.subtitle = c("bold", "dark grey", 14),
+      font.caption = c("bold.italic", "royal blue", 12),
+      font.legend = c("bold", "black", 12),
+ #surv.median.line = "hv", # Add medians survival
+break.x.by = 10,
+#xscale="d_m",
+ # Change legends: title & labels
+ legend.title = "SOX2 expresion",
+ legend.labs = c("High", "Low"),
+ # Add p-value and tervals
+ pval = TRUE,
+
+ conf.int = TRUE,
+ #conf.int.style="step",
+ # Add risk table
+ risk.table = TRUE,
+ fontsize = 3,
+ tables.height = 0.2,
+ tables.theme = theme_cleantable(font.main = c(14, "bold", "black"),),
+
+ # Color palettes. Use custom color: c("#E7B800", "#2E9FDF"),
+ # or brewer color (e.g.: "Dark2"), or ggsci color (e.g.: "jco")
+ palette = c("darkred", "#2E9FDF"),
+ ggtheme = theme_bw() # Change ggplot2 theme
+)
+sox2_plot$table %+% theme_cleantable(font.main = c("bold"))
+sox2_plot
+sox2_plot %>% ggpar(font.title = c("bold", "brown", 18),
+      font.subtitle = c("bold", "dark grey", 14),
+      font.caption = c("bold.italic", "royal blue", 12),
+      font.legend = c("bold", "black", 16))
+
+
+my_surival_function(
+  normalised_se = vsd2,
+  gene = c(
+    "SOX2"))
+mmrf_trt_response %>%
+  group_by(trtclass) %>%
+  summarise(n())
+```
 
 
 
 
+```{r}
+mmrf_sox2_PI <- mmrf_sox2 %>%
+  dplyr::filter(PUBLIC_ID %in% all_PI_IDs$public_id) %>%
+  left_join(select(all_PI_IDs, PUBLIC_ID=public_id, response, trtclass))
+
+# Logistic regression with both forms
+full_model <- glm(response ~ counts + strata, data = mmrf_sox2_PI, family = binomial)
+
+# Summary of the model
+summary(full_model) #%>% tbl_regression()
 
 
+poisson_model <- glm(counts ~ response, data = mmrf_sox2_PI, family = poisson)
+dispersion <- sum(residuals(poisson_model, type = "pearson")^2) / df.residual(poisson_model)
+print(dispersion)
 
+
+chisq_test <- chisq.test(mmrf_sox2_PI$strata, mmrf_sox2_PI$response)
+print(chisq_test)  
+mmrf_sox2_PI %>%
+  group_by(response) %>% summarise(n())
+```
 
